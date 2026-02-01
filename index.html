@@ -3,12 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Slender 3D - Limpieza Total</title>
+    <title>Slender 3D - Paredes Rojas</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; touch-action: none; }
         #ui { position: absolute; top: 10px; left: 10px; color: white; z-index: 30; background: rgba(0,0,0,0.85); padding: 15px; border-radius: 5px; border: 1px solid #444; }
         #game-stats { position: absolute; top: 10px; right: 10px; color: #ff0000; font-size: 22px; font-weight: bold; z-index: 30; text-shadow: 2px 2px #000; }
+        #victory-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: gold; font-size: 80px; font-weight: bold; z-index: 100; display: none; text-shadow: 4px 4px #000; }
         input { padding: 8px; border-radius: 4px; border: 1px solid #444; background: #222; color: white; margin-bottom: 5px; width: 140px; }
         button { cursor: pointer; padding: 10px; border: none; border-radius: 4px; font-weight: bold; text-transform: uppercase; margin-top: 5px; }
         .btn-join { background: #27ae60; color: white; width: 100%; }
@@ -25,6 +26,7 @@
 
 <div id="crosshair">+</div>
 <div id="game-stats">PÁGINAS: <span id="note-count">0</span>/8</div>
+<div id="victory-msg">YOU WON!</div>
 
 <div id="ui">
     <div id="lobby-panel">
@@ -34,7 +36,7 @@
             <button class="btn-join" onclick="connectToHost()">UNIRSE AL JUEGO</button>
         </div>
         <button id="start-btn" class="btn-start" onclick="startGame()">INICIAR PARTIDA</button>
-        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Limpia fantasmas automáticamente</div>
+        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Toca las paredes rojas para recolectarlas</div>
     </div>
 </div>
 
@@ -51,7 +53,8 @@
     const chatMessages = document.getElementById('chat-messages');
     const chatInput = document.getElementById('chat-input');
     
-    const worldMap = [
+    // 0: Vacío, 1: Pared, 2: Pared con Página (Roja)
+    let worldMap = [
         [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
         [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
         [1,0,1,1,1,1,0,1,1,1,1,1,1,1,0,1],
@@ -70,8 +73,8 @@
     ];
 
     const peer = new Peer();
-    let myId, hostConn, connections = {}, players = {}, notes = [], slenderman = { x: 8.5, y: 8.5, active: false };
-    let gameStarted = false, notesCollected = 0, isDead = false;
+    let myId, hostConn, connections = {}, players = {}, slenderman = { x: 8.5, y: 8.5, active: false };
+    let gameStarted = false, notesCollected = 0, isDead = false, gameWon = false;
 
     let posX = 1.5, posY = 1.5;
     let dirX = 1, dirY = 0, planeX = 0, planeY = 0.66;
@@ -92,7 +95,6 @@
             syncToAll();
         });
         conn.on('data', handleData);
-        conn.on('close', () => removePlayer(conn.peer));
     });
 
     function handleData(data) {
@@ -101,55 +103,59 @@
                 players[data.id].x = data.x;
                 players[data.id].y = data.y;
                 players[data.id].isDead = data.isDead;
-                players[data.id].lastSeen = Date.now(); // Heartbeat: sigue vivo
+                players[data.id].lastSeen = Date.now();
             }
-        } else if (data.type === 'chat') {
-            addChatMessage(data.sender, data.text);
-            if (!hostConn) broadcast(data, data.sender);
+        } else if (data.type === 'collect') {
+            // Solo el host procesa la recolección oficial para evitar duplicados
+            if (!hostConn) {
+                if (worldMap[data.mx][data.my] === 2) {
+                    worldMap[data.mx][data.my] = 1; // Se vuelve pared normal
+                    notesCollected++;
+                    checkWinCondition();
+                    syncToAll();
+                }
+            }
         } else if (data.type === 'update') {
-            notes = data.notes;
+            worldMap = data.worldMap;
             slenderman = data.slenderman;
             notesCollected = data.notesCollected;
+            gameWon = data.gameWon;
             if(data.gameStarted && !gameStarted) {
                 gameStarted = true;
                 document.getElementById('ui').classList.add('hidden');
             }
-            // Sincronizar lista de jugadores (borra fantasmas en clientes)
+            if(gameWon) document.getElementById('victory-msg').style.display = 'block';
+            else document.getElementById('victory-msg').style.display = 'none';
+
             let incoming = data.players;
             for(let id in players) if(id !== myId && !incoming[id]) delete players[id];
             for(let id in incoming) if(id !== myId) players[id] = incoming[id];
+        } else if (data.type === 'reset') {
+            resetGameLocal();
         }
     }
 
-    function removePlayer(peerId) {
-        if (players[peerId]) {
-            delete players[peerId];
-            if (connections[peerId]) {
-                connections[peerId].close();
-                delete connections[peerId];
-            }
-            addChatMessage("Sistema", "Un jugador abandonó la partida.");
-            
-            // Si eres el host y te quedas solo
-            if (Object.keys(players).length <= 1 && gameStarted) {
-                alert("Te has quedado solo. Partida terminada.");
-                location.reload();
-            }
+    function checkWinCondition() {
+        if (notesCollected >= 8 && !gameWon) {
+            gameWon = true;
             syncToAll();
+            setTimeout(() => {
+                broadcast({ type: 'reset' });
+                resetGameLocal();
+            }, 4000);
         }
     }
 
-    // Monitor de conexión: Si no recibimos datos en 4 segundos, fuera.
-    setInterval(() => {
-        if (!hostConn) { // Solo el Host vigila
-            const ahora = Date.now();
-            for (let id in players) {
-                if (id !== myId && ahora - players[id].lastSeen > 4000) {
-                    removePlayer(id);
-                }
-            }
-        }
-    }, 2000);
+    function resetGameLocal() {
+        gameStarted = false;
+        gameWon = false;
+        notesCollected = 0;
+        isDead = false;
+        posX = 1.5; posY = 1.5;
+        document.getElementById('ui').classList.remove('hidden');
+        document.getElementById('victory-msg').style.display = 'none';
+        document.exitPointerLock();
+    }
 
     function connectToHost() {
         const hId = document.getElementById('peer-id-input').value;
@@ -157,89 +163,91 @@
         hostConn = peer.connect(hId);
         hostConn.on('open', () => {
             document.getElementById('setup-controls').classList.add('hidden');
-            document.getElementById('status-msg').innerText = "Conectado. Esperando inicio...";
+            document.getElementById('status-msg').innerText = "Conectado. Esperando...";
             setInterval(() => {
                 if(hostConn.open) hostConn.send({ type: 'move', id: myId, x: posX, y: posY, isDead: isDead });
             }, 30);
         });
         hostConn.on('data', handleData);
-        hostConn.on('close', () => { alert("Conexión con Host perdida."); location.reload(); });
     }
 
     function startGame() {
-        if (Object.keys(players).length < 2) return alert("Necesitas más jugadores.");
-        gameStarted = true;
-        document.getElementById('ui').classList.add('hidden');
-        notes = [];
-        for(let i=0; i<8; i++) {
-            let rx, ry;
-            do { rx = Math.floor(Math.random()*13)+1; ry = Math.floor(Math.random()*13)+1; } 
-            while(worldMap[rx][ry] !== 0);
-            notes.push({ x: rx + 0.5, y: ry + 0.5, collected: false });
+        // Limpiar mapa de páginas anteriores
+        for(let x=0; x<worldMap.length; x++) 
+            for(let y=0; y<worldMap[0].length; y++) 
+                if(worldMap[x][y] === 2) worldMap[x][y] = 1;
+
+        // Generar 8 paredes rojas (ID 2)
+        let count = 0;
+        while(count < 8) {
+            let rx = Math.floor(Math.random() * (worldMap.length - 2)) + 1;
+            let ry = Math.floor(Math.random() * (worldMap[0].length - 2)) + 1;
+            // Solo poner en paredes existentes que no sean bordes
+            if(worldMap[rx][ry] === 1) {
+                worldMap[rx][ry] = 2;
+                count++;
+            }
         }
+        
+        gameStarted = true;
+        notesCollected = 0;
+        gameWon = false;
         slenderman.active = true;
+        document.getElementById('ui').classList.add('hidden');
         syncToAll();
     }
 
-    function broadcast(data, exclude = null) {
-        for (let id in connections) if (connections[id].open && id !== exclude) connections[id].send(data);
-        if (hostConn && hostConn.open && exclude !== 'host') hostConn.send(data);
+    function broadcast(data) {
+        for (let id in connections) if (connections[id].open) connections[id].send(data);
     }
 
     function syncToAll() {
-        if(!hostConn) broadcast({ type: 'update', players, notes, slenderman, gameStarted, notesCollected });
+        if(!hostConn) broadcast({ type: 'update', players, worldMap, slenderman, gameStarted, notesCollected, gameWon });
     }
-
-    function addChatMessage(sender, text) {
-        const div = document.createElement('div');
-        div.innerHTML = `<span style="color:#3498db">${sender.substring(0,5)}:</span> ${text}`;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    // Cerrar conexión limpia al salir de la pestaña
-    window.addEventListener('unload', () => peer.destroy());
-
-    // --- RENDER Y MOVIMIENTO ---
-    canvas.addEventListener('click', () => { if(!chatInput.matches(':focus')) canvas.requestPointerLock(); });
-
-    document.addEventListener('mousemove', (e) => {
-        if (document.pointerLockElement === canvas) {
-            let rot = e.movementX * mouseSensitivity; 
-            let oldDirX = dirX;
-            dirX = dirX * Math.cos(rot) - dirY * Math.sin(rot);
-            dirY = oldDirX * Math.sin(rot) + dirY * Math.cos(rot);
-            let oldPlaneX = planeX;
-            planeX = planeX * Math.cos(rot) - planeY * Math.sin(rot);
-            planeY = oldPlaneX * Math.sin(rot) + planeY * Math.cos(rot);
-        }
-    });
-
-    let keys = {};
-    window.onkeydown = e => keys[e.code] = true;
-    window.onkeyup = e => keys[e.code] = false;
 
     function handleMovement() {
-        if(!gameStarted || isDead) return;
+        if(!gameStarted || isDead || gameWon) return;
         let step = moveSpeed;
-        if(keys['KeyW']) {
-            if(worldMap[Math.floor(posX + dirX * step)][Math.floor(posY)] === 0) posX += dirX * step;
-            if(worldMap[Math.floor(posX)][Math.floor(posY + dirY * step)] === 0) posY += dirY * step;
+        let nextX = posX, nextY = posY;
+
+        if(keys['KeyW']) { nextX += dirX * step; nextY += dirY * step; }
+        if(keys['KeyS']) { nextX -= dirX * step; nextY -= dirY * step; }
+
+        // Colisión y Recolección
+        let checkX = Math.floor(nextX);
+        let checkY = Math.floor(nextY);
+
+        // Si intentamos entrar a una pared roja (ID 2), la recolectamos
+        if (worldMap[Math.floor(nextX + (dirX*0.2))][Math.floor(posY)] === 2) {
+            sendCollect(Math.floor(nextX + (dirX*0.2)), Math.floor(posY));
         }
-        if(keys['KeyS']) {
-            if(worldMap[Math.floor(posX - dirX * step)][Math.floor(posY)] === 0) posX -= dirX * step;
-            if(worldMap[Math.floor(posX)][Math.floor(posY - dirY * step)] === 0) posY -= dirY * step;
+        if (worldMap[Math.floor(posX)][Math.floor(nextY + (dirY*0.2))] === 2) {
+            sendCollect(Math.floor(posX), Math.floor(nextY + (dirY*0.2)));
         }
 
+        // Movimiento solo si es pasillo (0)
+        if(worldMap[Math.floor(nextX)][Math.floor(posY)] === 0) posX = nextX;
+        if(worldMap[Math.floor(posX)][Math.floor(nextY)] === 0) posY = nextY;
+
+        // Lógica Host (Slender)
         if(!hostConn && slenderman.active) {
             let angle = Math.atan2(posY - slenderman.y, posX - slenderman.x);
-            slenderman.x += Math.cos(angle) * 0.025;
-            slenderman.y += Math.sin(angle) * 0.025;
-            if(Math.hypot(posX - slenderman.x, posY - slenderman.y) < 0.4) {
-                if(Object.keys(players).length <= 1) { alert("ATRAPADO."); location.reload(); }
-                else { isDead = true; document.exitPointerLock(); document.getElementById('ui').classList.remove('hidden'); }
-            }
+            slenderman.x += Math.cos(angle) * 0.02;
+            slenderman.y += Math.sin(angle) * 0.02;
+            if(Math.hypot(posX - slenderman.x, posY - slenderman.y) < 0.4) isDead = true;
             syncToAll();
+        }
+    }
+
+    function sendCollect(mx, my) {
+        if (hostConn) hostConn.send({ type: 'collect', mx, my });
+        else {
+            if (worldMap[mx][my] === 2) {
+                worldMap[mx][my] = 1;
+                notesCollected++;
+                checkWinCondition();
+                syncToAll();
+            }
         }
     }
 
@@ -249,18 +257,17 @@
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
 
         if(!gameStarted) {
-            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.fillText("LOBBY: ESPERANDO JUGADORES", w/2, h/2);
+            ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.fillText("EN EL LOBBY", w/2, h/2);
             requestAnimationFrame(render); return;
         }
 
-        // Raycasting simple
         let zBuffer = new Array(w);
         for(let x = 0; x < w; x++) {
             let cameraX = 2 * x / w - 1;
             let rayDirX = dirX + planeX * cameraX, rayDirY = dirY + planeY * cameraX;
             let mapX = Math.floor(posX), mapY = Math.floor(posY);
             let deltaX = Math.abs(1 / rayDirX), deltaY = Math.abs(1 / rayDirY);
-            let stepX, stepY, sideDistX, sideDistY, hit = 0, side;
+            let stepX, stepY, sideDistX, sideDistY, hit = 0, side, wallType;
 
             if(rayDirX < 0) { stepX = -1; sideDistX = (posX - mapX) * deltaX; }
             else { stepX = 1; sideDistX = (mapX + 1.0 - posX) * deltaX; }
@@ -270,22 +277,27 @@
             while(hit === 0) {
                 if(sideDistX < sideDistY) { sideDistX += deltaX; mapX += stepX; side = 0; }
                 else { sideDistY += deltaY; mapY += stepY; side = 1; }
-                if(worldMap[mapX][mapY] > 0) hit = 1;
+                if(worldMap[mapX][mapY] > 0) { hit = 1; wallType = worldMap[mapX][mapY]; }
             }
             let perpDist = (side === 0) ? (sideDistX - deltaX) : (sideDistY - deltaY);
             zBuffer[x] = perpDist;
             let lineHeight = Math.floor(h / perpDist);
-            let color = Math.max(0, 150 - (perpDist * 15));
-            ctx.strokeStyle = `rgb(${side?color*0.5:color},${side?color*0.5:color},${side?color*0.5:color})`;
+            
+            // Color: Si es tipo 2 es Rojo, si es 1 es Gris
+            let baseCol = (wallType === 2) ? [255, 0, 0] : [150, 150, 150];
+            let factor = Math.max(0, 1 - (perpDist * 0.15));
+            let r = baseCol[0] * factor * (side ? 0.7 : 1);
+            let g = baseCol[1] * factor * (side ? 0.7 : 1);
+            let b = baseCol[2] * factor * (side ? 0.7 : 1);
+
+            ctx.strokeStyle = `rgb(${r},${g},${b})`;
             ctx.beginPath(); ctx.moveTo(x, h/2-lineHeight/2); ctx.lineTo(x, h/2+lineHeight/2); ctx.stroke();
         }
 
-        // Dibujar sprites (Jugadores y Slender)
+        // Sprites (Jugadores y Slender)
         let sprites = [];
-        notes.forEach(n => { if(!n.collected) sprites.push({...n, color:"white", sX:0.15, sY:0.2}); });
         if(slenderman.active) sprites.push({...slenderman, color:"#111", sX:0.5, sY:1.8});
         for(let id in players) if(id !== myId && !players[id].isDead) sprites.push({...players[id], sX:0.4, sY:0.6});
-
         sprites.sort((a,b) => Math.hypot(posX-b.x, posY-b.y) - Math.hypot(posX-a.x, posY-a.y));
         sprites.forEach(s => {
             let relX = s.x - posX, relY = s.y - posY;
@@ -305,6 +317,30 @@
         handleMovement();
         requestAnimationFrame(render);
     }
+
+    function addChatMessage(sender, text) {
+        const div = document.createElement('div');
+        div.innerHTML = `<span style="color:#3498db">${sender.substring(0,5)}:</span> ${text}`;
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    let keys = {};
+    window.onkeydown = e => keys[e.code] = true;
+    window.onkeyup = e => keys[e.code] = false;
+    canvas.addEventListener('click', () => { if(!chatInput.matches(':focus')) canvas.requestPointerLock(); });
+    document.addEventListener('mousemove', (e) => {
+        if (document.pointerLockElement === canvas) {
+            let rot = e.movementX * mouseSensitivity; 
+            let oldDirX = dirX;
+            dirX = dirX * Math.cos(rot) - dirY * Math.sin(rot);
+            dirY = oldDirX * Math.sin(rot) + dirY * Math.cos(rot);
+            let oldPlaneX = planeX;
+            planeX = planeX * Math.cos(rot) - planeY * Math.sin(rot);
+            planeY = oldPlaneX * Math.sin(rot) + planeY * Math.cos(rot);
+        }
+    });
+
     render();
 </script>
 </body>
