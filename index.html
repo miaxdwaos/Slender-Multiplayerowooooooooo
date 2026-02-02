@@ -19,6 +19,7 @@
         #chat-container { position: absolute; bottom: 20px; left: 20px; width: 300px; z-index: 40; background: rgba(0,0,0,0.5); border-radius: 5px; display: flex; flex-direction: column; }
         #chat-messages { height: 120px; overflow-y: auto; color: white; font-size: 13px; padding: 10px; display: flex; flex-direction: column; border-bottom: 1px solid #333; }
         #chat-input { background: rgba(0,0,0,0.8); border: 1px solid #555; width: calc(100% - 10px); margin: 5px; padding: 5px; color: white; outline: none; }
+        #player-list { margin-top: 10px; font-size: 12px; color: #aaa; border-top: 1px solid #444; padding-top: 5px; }
     </style>
 </head>
 <body>
@@ -28,13 +29,14 @@
 
 <div id="ui">
     <div id="lobby-panel">
-        <div>TU ID: <b id="my-id" style="color:#3498db">Cargando...</b></div>
+        <div>TU ID: <b id="my-id" style="color:#3498db">...</b></div>
         <div id="setup-controls" style="margin-top: 10px;">
             <input type="text" id="peer-id-input" placeholder="ID del Host">
             <button class="btn-join" onclick="connectToHost()">UNIRSE AL JUEGO</button>
         </div>
         <button id="start-btn" class="btn-start" onclick="startGame()">INICIAR PARTIDA</button>
-        <div id="status-msg" style="color: #f1c40f; margin-top: 10px; font-size: 11px;">Esperando jugadores para habilitar inicio...</div>
+        <div id="status-msg" style="color: #f1c40f; margin-top: 10px; font-size: 11px;">Esperando conexión...</div>
+        <div id="player-list">Jugadores: <span id="list-names">Cargando...</span></div>
     </div>
 </div>
 
@@ -77,6 +79,7 @@
         myId = id;
         document.getElementById('my-id').innerText = id;
         players[id] = { x: 1.5, y: 1.5, color: '#3498db', isDead: false };
+        updateLobbyUI();
     });
 
     peer.on('connection', conn => {
@@ -91,6 +94,40 @@
         conn.on('close', () => removePlayer(conn.peer));
     });
 
+    // Función para generar nombres cortos únicos (4 caracteres + índice si repite)
+    function getPlayerName(id) {
+        if (!id) return "...";
+        let short = id.substring(0, 4).toUpperCase();
+        let allIds = Object.keys(players).sort();
+        let count = 0;
+        for (let pid of allIds) {
+            if (pid === id) break;
+            if (pid.substring(0, 4).toUpperCase() === short) count++;
+        }
+        return count > 0 ? `${short}(${count + 1})` : short;
+    }
+
+    function updateLobbyUI() {
+        const startBtn = document.getElementById('start-btn');
+        const statusMsg = document.getElementById('status-msg');
+        const listNames = document.getElementById('list-names');
+        const pCount = Object.keys(players).length;
+
+        // Actualizar lista de nombres
+        let names = Object.keys(players).map(id => getPlayerName(id));
+        listNames.innerText = names.join(", ");
+
+        if (!hostConn) {
+            if (pCount >= 2) {
+                startBtn.style.display = 'block';
+                statusMsg.innerText = "Listo para iniciar.";
+            } else {
+                startBtn.style.display = 'none';
+                statusMsg.innerText = "Esperando más jugadores...";
+            }
+        }
+    }
+
     function handleData(data) {
         if (data.type === 'disconnect') {
             removePlayer(data.id);
@@ -103,13 +140,6 @@
         } else if (data.type === 'chat') {
             addChatMessage(data.sender, data.text);
             if (!hostConn) broadcast(data, data.sender); 
-        } else if (data.type === 'collect') {
-            if (!hostConn && worldMap[data.cx][data.cy] === 2) {
-                worldMap[data.cx][data.cy] = 0;
-                notesCollected++;
-                if(notesCollected >= maxNotes) endGame("VICTORIA");
-                syncToAll();
-            }
         } else if (data.type === 'update') {
             worldMap = data.worldMap;
             slenderman = data.slenderman;
@@ -122,50 +152,27 @@
             let incoming = data.players;
             for(let id in players) if(id !== myId && !incoming[id]) delete players[id];
             for(let id in incoming) if(id !== myId) players[id] = incoming[id];
+            updateLobbyUI();
         }
     }
 
-    // AVISO DE DESCONEXIÓN RÁPIDA
     window.addEventListener('beforeunload', () => {
         const msg = { type: 'disconnect', id: myId };
         if (hostConn && hostConn.open) hostConn.send(msg);
-        for (let id in connections) {
-            if (connections[id].open) connections[id].send(msg);
-        }
+        for (let id in connections) if (connections[id].open) connections[id].send(msg);
     });
 
     function removePlayer(peerId) {
         if (players[peerId]) {
             delete players[peerId];
-            if (connections[peerId]) {
-                connections[peerId].close();
-                delete connections[peerId];
-            }
+            if (connections[peerId]) { connections[peerId].close(); delete connections[peerId]; }
             
-            // LÓGICA DE REINICIO SOLICITADA
-            // Si después de borrar al jugador solo quedas tú (1 jugador)
             if (Object.keys(players).length < 2) {
                 alert("Juego Reiniciandose, Todos Los jugadores en multiplayer se salieron");
                 location.reload();
             } else {
                 updateLobbyUI();
                 syncToAll();
-            }
-        }
-    }
-
-    function updateLobbyUI() {
-        const startBtn = document.getElementById('start-btn');
-        const statusMsg = document.getElementById('status-msg');
-        const playerCount = Object.keys(players).length;
-
-        if (!hostConn) { // Solo el host ve el botón
-            if (playerCount >= 2) {
-                startBtn.style.display = 'block';
-                statusMsg.innerText = "Listo para iniciar.";
-            } else {
-                startBtn.style.display = 'none';
-                statusMsg.innerText = "Esperando más jugadores...";
             }
         }
     }
@@ -177,7 +184,7 @@
         hostConn.on('open', () => {
             document.getElementById('setup-controls').classList.add('hidden');
             document.getElementById('start-btn').classList.add('hidden');
-            document.getElementById('status-msg').innerText = "Conectado al Host. Esperando inicio...";
+            document.getElementById('status-msg').innerText = "Conectado. Esperando...";
             setInterval(() => {
                 if(hostConn.open) hostConn.send({ type: 'move', id: myId, x: posX, y: posY, isDead: isDead });
             }, 30);
@@ -194,7 +201,7 @@
         gameStarted = true;
         notesCollected = 0; maxNotes = 0;
         for(let r=0; r<worldMap.length; r++) {
-            for(let c=0; c<worldMap[r].length; c++) { if(worldMap[r][c] === 2) maxNotes++; }
+            for(let c=0; c<worldMap[r].length; c++) if(worldMap[r][c] === 2) maxNotes++;
         }
         document.getElementById('ui').classList.add('hidden');
         slenderman.active = true;
@@ -212,13 +219,13 @@
 
     function addChatMessage(sender, text) {
         const div = document.createElement('div');
-        const name = sender === myId ? "Tú" : sender.substring(0,4);
+        const name = sender === myId ? "Tú" : getPlayerName(sender);
         div.innerHTML = `<span style="color:#3498db">${name}:</span> ${text}`;
         chatMessages.appendChild(div);
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    // --- LÓGICA DE JUEGO (RAYCASTING) ---
+    // --- LÓGICA DE JUEGO ---
     let posX = 1.5, posY = 1.5, dirX = 1, dirY = 0, planeX = 0, planeY = 0.66;
     let moveSpeed = 0.08, mouseSensitivity = 0.003;
 
@@ -243,7 +250,9 @@
     function handleMovement() {
         if(!gameStarted || isDead) return;
         let step = moveSpeed;
-        let moveX = (keys['KeyW'] ? 1 : (keys['KeyS'] ? -1 : 0));
+        // MOVIMIENTO CON FLECHAS
+        let moveX = (keys['ArrowUp'] ? 1 : (keys['ArrowDown'] ? -1 : 0));
+        
         let targetX = posX + dirX * step * moveX;
         let targetY = posY + dirY * step * moveX;
         
@@ -252,13 +261,13 @@
         
         players[myId].x = posX; players[myId].y = posY;
 
-        let mx = Math.floor(posX), my = Math.floor(posY);
-        if(worldMap[mx] && worldMap[mx][my] === 2) {
-            let msg = { type: 'collect', cx: mx, cy: my };
-            if (hostConn) hostConn.send(msg); else handleData(msg);
+        if (hostConn) {
+            // Recoger nota
+            let mx = Math.floor(posX), my = Math.floor(posY);
+            if(worldMap[mx] && worldMap[mx][my] === 2) hostConn.send({ type: 'collect', cx: mx, cy: my });
         }
-
-        // Slenderman IA (Solo Host)
+        
+        // IA Slenderman (Host)
         if(!hostConn && slenderman.active) {
             let closest = null, minDist = 999;
             for(let id in players) {
@@ -288,7 +297,7 @@
         
         if(!gameStarted) {
             ctx.fillStyle = "white"; ctx.textAlign = "center"; 
-            ctx.fillText("MODO MULTIJUGADOR - ESPERANDO INICIO", w/2, h/2);
+            ctx.fillText("MULTIJUGADOR P2P - ESPERANDO", w/2, h/2);
             requestAnimationFrame(render); return;
         }
 
@@ -319,7 +328,7 @@
 
         let sprites = [];
         if(slenderman.active) sprites.push({...slenderman, color:"#111", sX:0.5, sY:1.8});
-        for(let id in players) if(id !== myId && !players[id].isDead) sprites.push({...players[id], sX:0.4, sY:0.6});
+        for(let id in players) if(id !== myId && !players[id].isDead) sprites.push({...players[id], id:id, sX:0.4, sY:0.6});
         
         sprites.sort((a,b) => Math.hypot(posX-b.x, posY-b.y) - Math.hypot(posX-a.x, posY-a.y));
         sprites.forEach(s => {
@@ -332,6 +341,11 @@
                 if(sx > 0 && sx < w && ty < zBuffer[sx]) {
                     ctx.fillStyle = s.color || "#e67e22";
                     ctx.fillRect(sx - sw/2, h/2 - sh/2, sw, sh);
+                    // Dibujar nombre corto sobre el jugador
+                    if(s.id) {
+                        ctx.fillStyle = "white"; ctx.font = "10px Arial";
+                        ctx.fillText(getPlayerName(s.id), sx, h/2 - sh/2 - 5);
+                    }
                 }
             }
         });
